@@ -1,2 +1,4 @@
 # Welcome to my Page!
-<img src="koi/koi.gif" width="512" alt="My GitHub Koi" />
+<marquee behavior="alternate" scrollamount="4">
+  <img src="koi/koi.gif" width="256" alt="My GitHub Koi" />
+</marquee>
