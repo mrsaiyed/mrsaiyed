@@ -1,3 +1,3 @@
 <p align="center">
-  <img src="koi/koi.gif" width="160" alt="My GitHub Koi" />
+  <img src="pond/pond.svg" width="100%" alt="My koi pond: a new koi joins as my GitHub contributions add up" />
 </p>
