@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Draw a koi pond for a GitHub profile README.
 
-The pond holds one koi for every so many contributions in the last 30 days, and
-always at least one. The first 10 koi are small and take one contribution each,
-the next 10 are bigger and take 5 each, and every koi after that is bigger still
-and takes 10. As old contributions fall out of the window the newest koi leave
-again. Each koi keeps the same colors and swimming path from day to day.
+The pond holds koi for the contributions in the last 30 days, and always at
+least one. Each of the first 10 contributions is a small koi, contributions 11
+to 20 make a bigger koi for every 5, and past 20 every 10 contributions make a
+bigger koi still. As old contributions fall out of the window the newest koi
+leave again. Each koi keeps the same colors and swimming path from day to day.
 
 Usage:
     GITHUB_TOKEN=... python3 scripts/pond.py --login octocat --output pond/pond.svg
@@ -27,12 +27,13 @@ from pathlib import Path
 # Contributions are counted over this many days, today included.
 WINDOW_DAYS = 30
 # Each tier is (how many koi it holds, contributions per koi, koi size). A tier
-# fills before the next one starts, and the last tier never fills. So 10
-# contributions make 10 small koi, 60 make 10 small and 10 medium, and 100 add
-# 4 large ones.
+# fills before the next one starts, and the last tier never fills. So
+# contributions 1-10 make a small koi each, 11-20 make two medium koi (one per
+# 5), and from 21 on every 10 make a large koi: 20 contributions are 12 koi and
+# 100 are 20.
 TIERS = [
     (10, 1, 0.65),
-    (10, 5, 1.0),
+    (2, 5, 1.0),
     (None, 10, 1.45),
 ]
 # A cap so a very busy month still leaves room to see the water.
