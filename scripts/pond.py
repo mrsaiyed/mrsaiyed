@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Draw a koi pond for a GitHub profile README.
 
-The pond starts with one koi and gains another as contributions add up. Each fish
-keeps the same colors and swimming path from day to day, and older fish grow
-bigger as newer ones join, so the pond reads as a record of everything so far.
+The pond holds one koi for every so many contributions in the last 30 days, and
+always at least one. The first 10 koi are small and take one contribution each,
+the next 10 are bigger and take 5 each, and every koi after that is bigger still
+and takes 10. As old contributions fall out of the window the newest koi leave
+again. Each koi keeps the same colors and swimming path from day to day.
 
 Usage:
     GITHUB_TOKEN=... python3 scripts/pond.py --login octocat --output pond/pond.svg
-    python3 scripts/pond.py --login octocat --contributions 500 --output preview.svg
+    python3 scripts/pond.py --login octocat --contributions 25 --output preview.svg
 
 Only the Python standard library is used, so a workflow needs no install step.
 """
@@ -19,14 +21,22 @@ import os
 import random
 import sys
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# How fast the pond fills: fish number k (counting from 0) arrives once total
-# contributions reach CONTRIBUTIONS_PER_STEP * k * k. With 5 that is 2 fish at 5
-# contributions, 5 at 80, 10 at 405, 20 at 1,805, and 40 at 7,605, so the first
-# few come quickly and later ones take more work.
-CONTRIBUTIONS_PER_STEP = 5
-MAX_FISH = 40
+# Contributions are counted over this many days, today included.
+WINDOW_DAYS = 30
+# Each tier is (how many koi it holds, contributions per koi, koi size). A tier
+# fills before the next one starts, and the last tier never fills. So 10
+# contributions make 10 small koi, 60 make 10 small and 10 medium, and 100 add
+# 4 large ones.
+TIERS = [
+    (10, 1, 0.65),
+    (10, 5, 1.0),
+    (None, 10, 1.45),
+]
+# A cap so a very busy month still leaves room to see the water.
+MAX_FISH = 50
 
 WIDTH = 800
 HEIGHT = 280
@@ -71,13 +81,35 @@ VARIETIES = [
 # Counting
 
 
-def fish_count(total):
-    return min(MAX_FISH, 1 + math.isqrt(total // CONTRIBUTIONS_PER_STEP))
+def fish_count(contributions):
+    """How many koi `contributions` buy, never fewer than one."""
+    count, left = 0, contributions
+    for capacity, per_fish, _ in TIERS:
+        bought = left // per_fish if capacity is None else min(left // per_fish, capacity)
+        count += bought
+        left -= bought * per_fish
+        if capacity is None or bought < capacity:
+            break
+    return min(MAX_FISH, max(1, count))
 
 
-def contributions_needed_for(fish_number):
-    """Total contributions at which fish number `fish_number` (from 0) arrives."""
-    return CONTRIBUTIONS_PER_STEP * fish_number * fish_number
+def contributions_needed_for(fish):
+    """Contributions it takes to have `fish` koi."""
+    total, remaining = 0, fish
+    for capacity, per_fish, _ in TIERS:
+        taken = remaining if capacity is None else min(remaining, capacity)
+        total += taken * per_fish
+        remaining -= taken
+    return total
+
+
+def fish_size(fish_number):
+    """The size of koi number `fish_number` (from 0), from the tier it falls in."""
+    for capacity, _, size in TIERS:
+        if capacity is None or fish_number < capacity:
+            return size
+        fish_number -= capacity
+    return TIERS[-1][2]
 
 
 def graphql(query, variables, token):
@@ -97,34 +129,30 @@ def graphql(query, variables, token):
     return body["data"]
 
 
-def total_contributions(login, token):
-    """Every contribution on the account's public calendar, summed over all years."""
+def recent_contributions(login, token, days=WINDOW_DAYS):
+    """Contributions on the account's public calendar in the last `days` days, today included."""
+    now = datetime.now(timezone.utc)
+    first_day = (now - timedelta(days=days - 1)).date()
     data = graphql(
-        "query($login: String!) { user(login: $login) "
-        "{ contributionsCollection { contributionYears } } }",
-        {"login": login},
+        "query($login: String!, $from: DateTime!, $to: DateTime!) { user(login: $login) "
+        "{ contributionsCollection(from: $from, to: $to) "
+        "{ contributionCalendar { weeks { contributionDays { date contributionCount } } } } } }",
+        {
+            "login": login,
+            "from": f"{first_day.isoformat()}T00:00:00Z",
+            "to": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
         token,
     )
     if data["user"] is None:
         raise RuntimeError(f"no GitHub account named {login!r}")
-    years = data["user"]["contributionsCollection"]["contributionYears"]
-    if not years:
-        return 0
-    # GitHub limits each contributionsCollection to one year, so ask for each
-    # year under its own alias in a single request.
-    fields = " ".join(
-        f'y{year}: contributionsCollection(from: "{year}-01-01T00:00:00Z", '
-        f'to: "{year}-12-31T23:59:59Z") {{ contributionCalendar {{ totalContributions }} }}'
-        for year in years
-    )
-    data = graphql(
-        f"query($login: String!) {{ user(login: $login) {{ {fields} }} }}",
-        {"login": login},
-        token,
-    )
+    weeks = data["user"]["contributionsCollection"]["contributionCalendar"]["weeks"]
+    # GitHub answers in whole weeks, so drop any days before the window.
     return sum(
-        collection["contributionCalendar"]["totalContributions"]
-        for collection in data["user"].values()
+        day["contributionCount"]
+        for week in weeks
+        for day in week["contributionDays"]
+        if day["date"] >= first_day.isoformat()
     )
 
 
@@ -274,20 +302,16 @@ def coat(variety, rng):
 # The pond
 
 
-def fish_svg(login, fish_number, total):
+def fish_svg(login, fish_number):
     rng = random.Random(f"koi:{login}:{fish_number}")
     variety = "asagi" if fish_number == 0 else rng.choices(*zip(*VARIETIES))[0]
     base, fin, markings = coat(variety, rng)
     path, length = swim_path(rng)
 
-    # Every fish grows a little with each contribution after it arrives, so the
-    # newest is a small fry and the oldest are the biggest. The first koi starts
-    # half grown so a new pond is not a single speck.
-    growth = math.sqrt(total / CONTRIBUTIONS_PER_STEP) - fish_number
-    scale = 0.6 + 0.8 * (1 - math.exp(-growth / 6))
-    if fish_number == 0:
-        scale = max(scale, 1.0)
-    speed = rng.uniform(13, 26)
+    # Size comes from the koi's tier, give or take a little so a tier is not uniform.
+    scale = fish_size(fish_number) * rng.uniform(0.93, 1.07)
+    # Small koi dart about a little faster than big ones.
+    speed = rng.uniform(13, 26) * (1.2 - 0.2 * scale)
     duration = length / speed
     start = -rng.uniform(0, duration)
     beat = rng.uniform(0.7, 1.1) * (0.8 + 0.25 * scale)
@@ -373,9 +397,10 @@ def ripple(rng):
     )
 
 
-def pond_svg(login, total, caption=True):
-    count = fish_count(total)
-    shadows, fishes = zip(*(fish_svg(login, number, total) for number in range(count)))
+def pond_svg(login, contributions, caption=True):
+    count = fish_count(contributions)
+    # Draw the biggest koi first so the small ones swim over them.
+    shadows, fishes = zip(*(fish_svg(login, number) for number in reversed(range(count))))
     rng = random.Random(f"pond:{login}")
 
     pebbles = []
@@ -404,9 +429,10 @@ def pond_svg(login, total, caption=True):
         if count >= MAX_FISH:
             progress = "the pond is full"
         else:
-            needed = contributions_needed_for(count) - total
+            needed = contributions_needed_for(count + 1) - contributions
             progress = f"{needed:,} more for the next koi"
-        label = f"{count} koi · {total:,} contributions · {progress}"
+        noun = "contribution" if contributions == 1 else "contributions"
+        label = f"{count} koi · {contributions:,} {noun} in the last {WINDOW_DAYS} days · {progress}"
         text = (
             f'<text x="{WIDTH - 16}" y="{HEIGHT - 14}" text-anchor="end" fill="#d6eff1" '
             'stroke="#08313c" stroke-width="3" stroke-linejoin="round" paint-order="stroke" '
@@ -414,7 +440,9 @@ def pond_svg(login, total, caption=True):
             f"{label}</text>"
         )
 
-    title = f"{login}'s koi pond: {count} koi" + (f" from {total:,} contributions" if caption else "")
+    title = f"{login}'s koi pond: {count} koi" + (
+        f" from {contributions:,} contributions in the last {WINDOW_DAYS} days" if caption else ""
+    )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {HEIGHT}" width="{WIDTH}" height="{HEIGHT}" '
         f'role="img" aria-label="{title}">'
@@ -448,26 +476,29 @@ def pond_svg(login, total, caption=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--login", required=True, help="GitHub account whose contributions fill the pond")
+    parser.add_argument("--login", required=True, help="GitHub account whose recent contributions fill the pond")
     parser.add_argument("--output", default="pond/pond.svg", help="where to write the SVG")
     parser.add_argument(
-        "--contributions", type=int, help="use this total instead of asking GitHub (for previews)"
+        "--contributions", type=int, help="use this 30-day count instead of asking GitHub (for previews)"
     )
     parser.add_argument("--no-caption", action="store_true", help="leave out the count in the corner")
     args = parser.parse_args()
 
     if args.contributions is not None:
-        total = args.contributions
+        contributions = args.contributions
     else:
         token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         if not token:
             sys.exit("set GITHUB_TOKEN (the workflow's built-in token is enough), or pass --contributions")
-        total = total_contributions(args.login, token)
+        contributions = recent_contributions(args.login, token)
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(pond_svg(args.login, total, caption=not args.no_caption), encoding="utf-8")
-    print(f"{args.login}: {total:,} contributions, {fish_count(total)} koi -> {output}")
+    output.write_text(pond_svg(args.login, contributions, caption=not args.no_caption), encoding="utf-8")
+    print(
+        f"{args.login}: {contributions:,} contributions in the last {WINDOW_DAYS} days, "
+        f"{fish_count(contributions)} koi -> {output}"
+    )
 
 
 if __name__ == "__main__":
